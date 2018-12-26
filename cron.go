@@ -4,6 +4,7 @@ package cron // import "gopkg.in/robfig/cron.v2"
 import (
 	"sort"
 	"time"
+	"fmt"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
@@ -14,6 +15,7 @@ type Cron struct {
 	stop     chan struct{}
 	add      chan *Entry
 	remove   chan EntryID
+	removeName chan string
 	snapshot chan []Entry
 	running  bool
 	nextID   EntryID
@@ -52,6 +54,9 @@ type Entry struct {
 
 	// Job is the thing to run when the Schedule is activated.
 	Job Job
+
+	// The Job's name
+	Name string
 }
 
 // Valid returns true if this is not the zero entry.
@@ -84,6 +89,7 @@ func New() *Cron {
 		stop:     make(chan struct{}),
 		snapshot: make(chan []Entry),
 		remove:   make(chan EntryID),
+		removeName:make(chan string),
 		running:  false,
 	}
 }
@@ -94,26 +100,63 @@ type FuncJob func()
 func (f FuncJob) Run() { f() }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddFunc(spec string, cmd func()) (EntryID, error) {
-	return c.AddJob(spec, FuncJob(cmd))
+func (c *Cron) AddFunc(spec string, cmd func(),names ...string) (EntryID, error) {
+	var name string
+	if len(names) <= 0 {
+		name = fmt.Sprintf("%d", time.Now().Unix())
+	} else {
+		name = names[0]
+	}
+	return c.AddJob(spec, FuncJob(cmd),name)
+}
+
+// AddFunc adds a func to the Cron to be run on the given schedule.
+func (c *Cron) AddOnceFunc(spec string, cmd func(), names ...string) (EntryID, error) {
+	var name string
+	if len(names) <= 0 {
+		name = fmt.Sprintf("%d", time.Now().Unix())
+	} else {
+		name = names[0]
+	}
+
+	// Support Once run function.
+	onceCmd := func() {
+		cmd()
+		c.RemoveByName(name)
+	}
+
+	return c.AddJob(spec, FuncJob(onceCmd), name)
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) AddJob(spec string, cmd Job) (EntryID, error) {
+func (c *Cron) AddJob(spec string, cmd Job,names ...string) (EntryID, error) {
 	schedule, err := Parse(spec)
 	if err != nil {
 		return 0, err
 	}
-	return c.Schedule(schedule, cmd), nil
+	var name string
+	if len(names) <= 0 {
+		name = fmt.Sprintf("%d", time.Now().Unix())
+	} else {
+		name = names[0]
+	}
+	return c.Schedule(schedule, cmd,name), nil
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job) EntryID {
+func (c *Cron) Schedule(schedule Schedule, cmd Job,names ...string) EntryID {
+	var name string
+	if len(names) <= 0 {
+		name = fmt.Sprintf("%d", time.Now().Unix())
+	} else {
+		name = names[0]
+	}
 	c.nextID++
 	entry := &Entry{
 		ID:       c.nextID,
 		Schedule: schedule,
 		Job:      cmd,
+		Name:name,
 	}
 	if !c.running {
 		c.entries = append(c.entries, entry)
@@ -142,12 +185,31 @@ func (c *Cron) Entry(id EntryID) Entry {
 	return Entry{}
 }
 
+// EntryByName returns a snapshot of the given entry, or nil if it couldn't be found.
+func (c *Cron) EntryByName(name string) Entry {
+	for _, entry := range c.Entries() {
+		if name == entry.Name {
+			return entry
+		}
+	}
+	return Entry{}
+}
+
 // Remove an entry from being run in the future.
 func (c *Cron) Remove(id EntryID) {
 	if c.running {
 		c.remove <- id
 	} else {
 		c.removeEntry(id)
+	}
+}
+
+// Remove an entry from being run in the future.
+func (c *Cron) RemoveByName(name string) {
+	if c.running {
+		c.removeName <- name
+	} else {
+		c.removeEntryByName(name)
 	}
 }
 
@@ -202,6 +264,9 @@ func (c *Cron) run() {
 		case id := <-c.remove:
 			c.removeEntry(id)
 
+		case name:= <- c.removeName:
+			c.removeEntryByName(name)
+
 		case <-c.stop:
 			return
 		}
@@ -229,6 +294,16 @@ func (c *Cron) removeEntry(id EntryID) {
 	var entries []*Entry
 	for _, e := range c.entries {
 		if e.ID != id {
+			entries = append(entries, e)
+		}
+	}
+	c.entries = entries
+}
+
+func (c *Cron) removeEntryByName(name string) {
+	var entries []*Entry
+	for _, e := range c.entries {
+		if e.Name != name {
 			entries = append(entries, e)
 		}
 	}
