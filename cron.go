@@ -52,6 +52,9 @@ type Entry struct {
 	// Prev is the last time this job was run, or the zero time if never.
 	Prev time.Time
 
+	// Spec is the spec setting
+	Spec string
+
 	// Job is the thing to run when the Schedule is activated.
 	Job Job
 
@@ -140,11 +143,11 @@ func (c *Cron) AddJob(spec string, cmd Job,names ...string) (EntryID, error) {
 	} else {
 		name = names[0]
 	}
-	return c.Schedule(schedule, cmd,name), nil
+	return c.Schedule(schedule, cmd,spec,name), nil
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job,names ...string) EntryID {
+func (c *Cron) Schedule(schedule Schedule, cmd Job,spec string,names ...string) EntryID {
 	var name string
 	if len(names) <= 0 {
 		name = fmt.Sprintf("%d", time.Now().Unix())
@@ -156,7 +159,8 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job,names ...string) EntryID {
 		ID:       c.nextID,
 		Schedule: schedule,
 		Job:      cmd,
-		Name:name,
+		Name:     name,
+		Spec:     spec,
 	}
 	if !c.running {
 		c.entries = append(c.entries, entry)
