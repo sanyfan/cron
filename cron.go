@@ -103,18 +103,18 @@ type FuncJob func()
 func (f FuncJob) Run() { f() }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddFunc(spec string, cmd func(),names ...string) (EntryID, error) {
+func (c *Cron) AddFunc(spec,start string, cmd func(),names ...string) (EntryID, error) {
 	var name string
 	if len(names) <= 0 {
 		name = fmt.Sprintf("%d", time.Now().Unix())
 	} else {
 		name = names[0]
 	}
-	return c.AddJob(spec, FuncJob(cmd),name)
+	return c.AddJob(spec,start, FuncJob(cmd),name)
 }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddOnceFunc(spec string, cmd func(), names ...string) (EntryID, error) {
+func (c *Cron) AddOnceFunc(spec,start string, cmd func(), names ...string) (EntryID, error) {
 	var name string
 	if len(names) <= 0 {
 		name = fmt.Sprintf("%d", time.Now().Unix())
@@ -128,12 +128,12 @@ func (c *Cron) AddOnceFunc(spec string, cmd func(), names ...string) (EntryID, e
 		c.RemoveByName(name)
 	}
 
-	return c.AddJob(spec, FuncJob(onceCmd), name)
+	return c.AddJob(spec,start, FuncJob(onceCmd), name)
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) AddJob(spec string, cmd Job,names ...string) (EntryID, error) {
-	schedule, err := Parse(spec)
+func (c *Cron) AddJob(spec,start string, cmd Job,names ...string) (EntryID, error) {
+	schedule, err := Parse(spec,start)
 	if err != nil {
 		return 0, err
 	}

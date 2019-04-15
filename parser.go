@@ -9,13 +9,15 @@ import (
 	"time"
 )
 
+const DateFormat = "2006-01-02"
+
 // Parse returns a new crontab schedule representing the given spec.
 // It returns a descriptive error if the spec is not valid.
 //
 // It accepts
 //   - Full crontab specs, e.g. "* * * * * ?"
 //   - Descriptors, e.g. "@midnight", "@every 1h30m"
-func Parse(spec string) (_ Schedule, err error) {
+func Parse(spec string, start string) (_ Schedule, err error) {
 	// Convert panics into errors
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -49,7 +51,7 @@ func Parse(spec string) (_ Schedule, err error) {
 	if len(fields) == 5 {
 		fields = append([]string{"0"}, fields...)
 	}
-
+	startTime, _ := time.Parse(DateFormat, start)
 	schedule := &SpecSchedule{
 		Second:   getField(fields[0], seconds),
 		Minute:   getField(fields[1], minutes),
@@ -58,6 +60,7 @@ func Parse(spec string) (_ Schedule, err error) {
 		Month:    getField(fields[4], months),
 		Dow:      getField(fields[5], dow),
 		Location: loc,
+		Start:    startTime,
 	}
 
 	return schedule, nil

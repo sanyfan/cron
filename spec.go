@@ -1,12 +1,15 @@
 package cron
 
-import "time"
+import (
+	"time"
+)
 
 // SpecSchedule specifies a duty cycle (to the second granularity), based on a
 // traditional crontab specification. It is computed initially and stored as bit sets.
 type SpecSchedule struct {
 	Second, Minute, Hour, Dom, Month, Dow uint64
 	Location                              *time.Location
+	Start                                 time.Time
 }
 
 // bounds provides a range of acceptable values (plus a map of name to value).
@@ -65,8 +68,8 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 	// Convert the given time into the schedule's timezone.
 	// Save the original timezone so we can convert back after we find a time.
 	origLocation := t.Location()
-	t = t.In(s.Location)
-
+	// t = t.In(s.Location)
+	t = s.Start
 	// Start at the earliest possible time (the upcoming second).
 	t = t.Add(1*time.Second - time.Duration(t.Nanosecond())*time.Nanosecond)
 
@@ -146,7 +149,10 @@ WRAP:
 			goto WRAP
 		}
 	}
-
+	s.Start = t
+	for t.Before(time.Now()) {
+		t = s.Next(t)
+	}
 	return t.In(origLocation)
 }
 
