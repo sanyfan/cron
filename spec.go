@@ -57,6 +57,15 @@ const (
 // Next returns the next time this schedule is activated, greater than the given
 // time.  If no time can be found to satisfy the schedule, return the zero time.
 func (s *SpecSchedule) Next(t time.Time) time.Time {
+	t = s.Start
+	for t.Before(time.Now()) {
+		t = s.nextTime(t)
+	}
+	s.Start = t
+	return t
+}
+
+func (s *SpecSchedule) nextTime(t time.Time) time.Time {
 	// General approach:
 	// For Month, Day, Hour, Minute, Second:
 	// Check if the time value matches.  If yes, continue to the next field.
@@ -68,8 +77,7 @@ func (s *SpecSchedule) Next(t time.Time) time.Time {
 	// Convert the given time into the schedule's timezone.
 	// Save the original timezone so we can convert back after we find a time.
 	origLocation := t.Location()
-	// t = t.In(s.Location)
-	t = s.Start
+	t = t.In(s.Location)
 	// Start at the earliest possible time (the upcoming second).
 	t = t.Add(1*time.Second - time.Duration(t.Nanosecond())*time.Nanosecond)
 

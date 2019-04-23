@@ -8,56 +8,56 @@ import (
 
 func TestActivation(t *testing.T) {
 	tests := []struct {
-		time, spec string
+		time, spec,start string
 		expected   bool
 	}{
 		// Every fifteen minutes.
-		{"Mon Jul 9 15:00 2012", "0/15 * * * *", true},
-		{"Mon Jul 9 15:45 2012", "0/15 * * * *", true},
-		{"Mon Jul 9 15:40 2012", "0/15 * * * *", false},
+		{"Mon Jul 9 15:00 2012", "0/15 * * * *","2015-01-05", true},
+		{"Mon Jul 9 15:45 2012", "0/15 * * * *", "2015-01-05", true},
+		{"Mon Jul 9 15:40 2012", "0/15 * * * *", "2015-01-05", false},
 
 		// Every fifteen minutes, starting at 5 minutes.
-		{"Mon Jul 9 15:05 2012", "5/15 * * * *", true},
-		{"Mon Jul 9 15:20 2012", "5/15 * * * *", true},
-		{"Mon Jul 9 15:50 2012", "5/15 * * * *", true},
+		{"Mon Jul 9 15:05 2012", "5/15 * * * *", "2015-01-05", true},
+		{"Mon Jul 9 15:20 2012", "5/15 * * * *", "2015-01-05", true},
+		{"Mon Jul 9 15:50 2012", "5/15 * * * *", "2015-01-05", true},
 
 		// Named months
-		{"Sun Jul 15 15:00 2012", "0/15 * * Jul *", true},
-		{"Sun Jul 15 15:00 2012", "0/15 * * Jun *", false},
+		{"Sun Jul 15 15:00 2012", "0/15 * * Jul *", "2015-01-05", true},
+		{"Sun Jul 15 15:00 2012", "0/15 * * Jun *", "2015-01-05", false},
 
 		// Everything set.
-		{"Sun Jul 15 08:30 2012", "0 30 08 ? Jul Sun", true},
-		{"Sun Jul 15 08:30 2012", "0 30 08 15 Jul ?", true},
-		{"Mon Jul 16 08:30 2012", "0 30 08 ? Jul Sun", false},
-		{"Mon Jul 16 08:30 2012", "0 30 08 15 Jul ?", false},
+		{"Sun Jul 15 08:30 2012", "0 30 08 ? Jul Sun", "2015-01-05", true},
+		{"Sun Jul 15 08:30 2012", "0 30 08 15 Jul ?", "2015-01-05", true},
+		{"Mon Jul 16 08:30 2012", "0 30 08 ? Jul Sun","2015-01-05",  false},
+		{"Mon Jul 16 08:30 2012", "0 30 08 15 Jul ?", "2015-01-05", false},
 
 		// Predefined schedules
-		{"Mon Jul 9 15:00 2012", "@hourly", true},
-		{"Mon Jul 9 15:04 2012", "@hourly", false},
-		{"Mon Jul 9 15:00 2012", "@daily", false},
-		{"Mon Jul 9 00:00 2012", "@daily", true},
-		{"Mon Jul 9 00:00 2012", "@weekly", false},
-		{"Sun Jul 8 00:00 2012", "@weekly", true},
-		{"Sun Jul 8 01:00 2012", "@weekly", false},
-		{"Sun Jul 8 00:00 2012", "@monthly", false},
-		{"Sun Jul 1 00:00 2012", "@monthly", true},
+		{"Mon Jul 9 15:00 2012", "@hourly", "2015-01-05", true},
+		{"Mon Jul 9 15:04 2012", "@hourly", "2015-01-05", false},
+		{"Mon Jul 9 15:00 2012", "@daily", "2015-01-05", false},
+		{"Mon Jul 9 00:00 2012", "@daily", "2015-01-05", true},
+		{"Mon Jul 9 00:00 2012", "@weekly","2015-01-05",  false},
+		{"Sun Jul 8 00:00 2012", "@weekly", "2015-01-05", true},
+		{"Sun Jul 8 01:00 2012", "@weekly", "2015-01-05", false},
+		{"Sun Jul 8 00:00 2012", "@monthly", "2015-01-05", false},
+		{"Sun Jul 1 00:00 2012", "@monthly", "2015-01-05", true},
 
 		// Test interaction of DOW and DOM.
 		// If both are specified, then only one needs to match.
-		{"Sun Jul 15 00:00 2012", "0 * * 1,15 * Sun", true},
-		{"Fri Jun 15 00:00 2012", "0 * * 1,15 * Sun", true},
-		{"Wed Aug 1 00:00 2012", "0 * * 1,15 * Sun", true},
+		{"Sun Jul 15 00:00 2012", "0 * * 1,15 * Sun","2015-01-05",  true},
+		{"Fri Jun 15 00:00 2012", "0 * * 1,15 * Sun","2015-01-05",  true},
+		{"Wed Aug 1 00:00 2012", "0 * * 1,15 * Sun", "2015-01-05", true},
 
 		// However, if one has a star, then both need to match.
-		{"Sun Jul 15 00:00 2012", "0 * * * * Mon", false},
-		{"Sun Jul 15 00:00 2012", "0 * * */10 * Sun", false},
-		{"Mon Jul 9 00:00 2012", "0 * * 1,15 * *", false},
-		{"Sun Jul 15 00:00 2012", "0 * * 1,15 * *", true},
-		{"Sun Jul 15 00:00 2012", "0 * * */2 * Sun", true},
+		{"Sun Jul 15 00:00 2012", "0 * * * * Mon", "2015-01-05", false},
+		{"Sun Jul 15 00:00 2012", "0 * * */10 * Sun","2015-01-05",  false},
+		{"Mon Jul 9 00:00 2012", "0 * * 1,15 * *", "2015-01-05", false},
+		{"Sun Jul 15 00:00 2012", "0 * * 1,15 * *", "2015-01-05", true},
+		{"Sun Jul 15 00:00 2012", "0 * * */2 * Sun","2015-01-05",  true},
 	}
 
 	for _, test := range tests {
-		sched, err := Parse(test.spec)
+		sched, err := Parse(test.spec,test.start)
 		if err != nil {
 			t.Error(err)
 			continue
