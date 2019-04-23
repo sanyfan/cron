@@ -57,8 +57,8 @@ const (
 // Next returns the next time this schedule is activated, greater than the given
 // time.  If no time can be found to satisfy the schedule, return the zero time.
 func (s *SpecSchedule) Next(t time.Time) time.Time {
-	t = s.Start
-	for t.Before(time.Now()) {
+	t = s.nextTime(s.Start)
+	for !t.After(time.Now()) {
 		t = s.nextTime(t)
 	}
 	s.Start = t
@@ -156,10 +156,6 @@ WRAP:
 		if t.Second() == 0 {
 			goto WRAP
 		}
-	}
-	s.Start = t
-	for t.Before(time.Now()) {
-		t = s.Next(t)
 	}
 	return t.In(origLocation)
 }

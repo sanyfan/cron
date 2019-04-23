@@ -51,7 +51,7 @@ func Parse(spec string, start string) (_ Schedule, err error) {
 	if len(fields) == 5 {
 		fields = append([]string{"0"}, fields...)
 	}
-	startTime, _ := time.Parse(DateFormat, start)
+	startTime, _ := time.ParseInLocation(DateFormat, start,loc)
 	schedule := &SpecSchedule{
 		Second:   getField(fields[0], seconds),
 		Minute:   getField(fields[1], minutes),
