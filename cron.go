@@ -2,23 +2,29 @@
 package cron // import "gopkg.in/robfig/cron.v2"
 
 import (
+	"encoding/json"
+	"fmt"
+	"github.com/bsm/redis-lock"
+	"github.com/spf13/viper"
 	"sort"
 	"time"
-	"fmt"
+	"wheels/log"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries  []*Entry
-	stop     chan struct{}
-	add      chan *Entry
-	remove   chan EntryID
+	entries    []*Entry
+	stop       chan struct{}
+	add        chan *Entry
+	remove     chan EntryID
 	removeName chan string
-	snapshot chan []Entry
-	running  bool
-	nextID   EntryID
+	snapshot   chan []Entry
+	running    bool
+	nextID     EntryID
+	mode       string
+	ns         string
 }
 
 // Job is an interface for submitted cron jobs.
@@ -87,14 +93,40 @@ func (s byTime) Less(i, j int) bool {
 // New returns a new Cron job runner.
 func New() *Cron {
 	return &Cron{
-		entries:  nil,
-		add:      make(chan *Entry),
-		stop:     make(chan struct{}),
-		snapshot: make(chan []Entry),
-		remove:   make(chan EntryID),
-		removeName:make(chan string),
-		running:  false,
+		entries:    nil,
+		add:        make(chan *Entry),
+		stop:       make(chan struct{}),
+		snapshot:   make(chan []Entry),
+		remove:     make(chan EntryID),
+		removeName: make(chan string),
+		running:    false,
+		mode:       "normal",
 	}
+}
+
+func NewPoolWithRedis(v *viper.Viper, ns string) *Cron {
+	err := InitRedisClient(v, ns)
+	if err != nil {
+		log.Error("Init Redis Err")
+		return New()
+	}
+	cron := &Cron{
+		entries:    nil,
+		add:        make(chan *Entry),
+		stop:       make(chan struct{}),
+		snapshot:   make(chan []Entry),
+		remove:     make(chan EntryID),
+		removeName: make(chan string),
+		running:    false,
+		mode:       "redis",
+		ns:         ns,
+	}
+	RedisCli.Set(buildCronKey(ns), cron.entries, 0)
+	return cron
+}
+
+func buildCronKey(ns string) string {
+	return fmt.Sprintf("%s:%s", "cronEntries", ns)
 }
 
 // FuncJob is a wrapper that turns a func() into a cron.Job
@@ -103,18 +135,18 @@ type FuncJob func()
 func (f FuncJob) Run() { f() }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddFunc(spec,start string, cmd func(),unique bool,names ...string) (EntryID, error) {
+func (c *Cron) AddFunc(spec, start string, cmd func(), unique bool, names ...string) (EntryID, error) {
 	var name string
 	if len(names) <= 0 {
 		name = fmt.Sprintf("%d", time.Now().Unix())
 	} else {
 		name = names[0]
 	}
-	return c.AddJob(spec,start, FuncJob(cmd),unique,name)
+	return c.AddJob(spec, start, FuncJob(cmd), unique, name)
 }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddOnceFunc(spec,start string, cmd func(), names ...string) (EntryID, error) {
+func (c *Cron) AddOnceFunc(spec, start string, cmd func(), names ...string) (EntryID, error) {
 	var name string
 	if len(names) <= 0 {
 		name = fmt.Sprintf("%d", time.Now().Unix())
@@ -128,12 +160,12 @@ func (c *Cron) AddOnceFunc(spec,start string, cmd func(), names ...string) (Entr
 		c.RemoveByName(name)
 	}
 
-	return c.AddJob(spec,start, FuncJob(onceCmd),true, name)
+	return c.AddJob(spec, start, FuncJob(onceCmd), true, name)
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) AddJob(spec,start string, cmd Job,unique bool,names ...string) (EntryID, error) {
-	schedule, err := Parse(spec,start)
+func (c *Cron) AddJob(spec, start string, cmd Job, unique bool, names ...string) (EntryID, error) {
+	schedule, err := Parse(spec, start)
 	if err != nil {
 		return 0, err
 	}
@@ -143,14 +175,14 @@ func (c *Cron) AddJob(spec,start string, cmd Job,unique bool,names ...string) (E
 	} else {
 		name = names[0]
 	}
-	if unique && len(names) > 0{
+	if unique && len(names) > 0 {
 		c.RemoveByName(name)
 	}
-	return c.Schedule(schedule, cmd,spec,name), nil
+	return c.Schedule(schedule, cmd, spec, name), nil
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job,spec string,names ...string) EntryID {
+func (c *Cron) Schedule(schedule Schedule, cmd Job, spec string, names ...string) EntryID {
 	var name string
 	if len(names) <= 0 {
 		name = fmt.Sprintf("%d", time.Now().Unix())
@@ -166,7 +198,7 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job,spec string,names ...string) 
 		Spec:     spec,
 	}
 	if !c.running {
-		c.entries = append(c.entries, entry)
+		c.addEntry(entry)
 	} else {
 		c.add <- entry
 	}
@@ -231,27 +263,28 @@ func (c *Cron) Start() {
 func (c *Cron) run() {
 	// Figure out the next activation times for each entry.
 	now := time.Now().Local()
-	for _, entry := range c.entries {
-		entry.Next = entry.Schedule.Next(now)
-	}
 
 	for {
+		entries := c.getEntries()
+		for _, entry := range entries {
+			entry.Next = entry.Schedule.Next(now)
+		}
 		// Determine the next entry to run.
-		sort.Sort(byTime(c.entries))
+		sort.Sort(byTime(entries))
 
 		var effective time.Time
-		if len(c.entries) == 0 || c.entries[0].Next.IsZero() {
+		if len(entries) == 0 || entries[0].Next.IsZero() {
 			// If there are no entries yet, just sleep - it still handles new entries
 			// and stop requests.
 			effective = now.AddDate(10, 0, 0)
 		} else {
-			effective = c.entries[0].Next
+			effective = entries[0].Next
 		}
 
 		select {
 		case now = <-time.After(effective.Sub(now)):
 			// Run every entry whose next time was this effective time.
-			for _, e := range c.entries {
+			for _, e := range entries {
 				if e.Next != effective {
 					break
 				}
@@ -263,8 +296,8 @@ func (c *Cron) run() {
 
 		case newEntry := <-c.add:
 			now = time.Now().Local()
-			c.entries = append(c.entries, newEntry)
-			newEntry.Next = newEntry.Schedule.Next(now)
+			c.addEntry(newEntry)
+			// newEntry.Next = newEntry.Schedule.Next(now)
 
 		case <-c.snapshot:
 			c.snapshot <- c.entrySnapshot()
@@ -272,7 +305,7 @@ func (c *Cron) run() {
 		case id := <-c.remove:
 			c.removeEntry(id)
 
-		case name:= <- c.removeName:
+		case name := <-c.removeName:
 			c.removeEntryByName(name)
 
 		case <-c.stop:
@@ -291,29 +324,95 @@ func (c *Cron) Stop() {
 
 // entrySnapshot returns a copy of the current cron entry list.
 func (c *Cron) entrySnapshot() []Entry {
-	var entries = make([]Entry, len(c.entries))
-	for i, e := range c.entries {
-		entries[i] = *e
+	entries := c.getEntries()
+	var re = make([]Entry, len(entries))
+	for i, e := range entries {
+		re[i] = *e
 	}
-	return entries
+	return re
+}
+
+func (c *Cron) addEntry(e *Entry) {
+	if c.mode == "normal" {
+		c.entries = append(c.entries, e)
+		return
+	}
+	lock, err := c.newLock()
+	if err != nil {
+		return
+	}
+	defer lock.Unlock()
+	entries := c.getEntries()
+	entries = append(entries, e)
+	c.setEntries(entries)
+	return
 }
 
 func (c *Cron) removeEntry(id EntryID) {
-	var entries []*Entry
-	for _, e := range c.entries {
+	var re []*Entry
+	lock, err := c.newLock()
+	if err != nil {
+		return
+	}
+	defer lock.Unlock()
+	entries := c.getEntries()
+	for _, e := range entries {
 		if e.ID != id {
-			entries = append(entries, e)
+			re = append(re, e)
 		}
 	}
-	c.entries = entries
+	c.setEntries(re)
 }
 
 func (c *Cron) removeEntryByName(name string) {
-	var entries []*Entry
-	for _, e := range c.entries {
+	var re []*Entry
+	lock, err := c.newLock()
+	if err != nil {
+		return
+	}
+	defer lock.Unlock()
+	entries := c.getEntries()
+	for _, e := range entries {
 		if e.Name != name {
-			entries = append(entries, e)
+			re = append(re, e)
 		}
 	}
-	c.entries = entries
+	c.setEntries(re)
+}
+
+func (c *Cron) getEntries() []*Entry {
+	if c.mode == "normal" {
+		return c.entries
+	}
+	entriesStr, err := RedisCli.GetString(buildCronKey(c.ns))
+	if err != nil {
+		log.Error("Get Entries from Redis Err: ", err)
+		return nil
+	}
+	var re []*Entry
+	err = json.Unmarshal([]byte(entriesStr), &re)
+	if err != nil {
+		log.Error("Unmarshal Entries from Redis Err: ", err)
+		return nil
+	}
+	return re
+}
+
+func (c *Cron) setEntries(e []*Entry) error {
+	if c.mode == "normal" {
+		c.entries = e
+		return nil
+	}
+	entriesStr, _ := json.Marshal(e)
+	_, err := RedisCli.Set(buildCronKey(c.ns), string(entriesStr), 0)
+	return err
+}
+
+func (c *Cron) newLock() (*lock.Locker, error) {
+	lock, err := lock.Obtain(RedisCli.Client, buildCronKey(c.ns), nil)
+	if err != nil {
+		log.Error("Obtain Redis Lock Err: ", err)
+		return nil, err
+	}
+	return lock, nil
 }
