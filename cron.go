@@ -3,12 +3,13 @@ package cron // import "gopkg.in/robfig/cron.v2"
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/bsm/redis-lock"
 	"github.com/spf13/viper"
+	"reflect"
 	"sort"
 	"time"
-	"wheels/log"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
@@ -25,6 +26,12 @@ type Cron struct {
 	nextID     EntryID
 	mode       string
 	ns         string
+	funcList   map[string]interface{}
+}
+
+type FuncInfo struct {
+	name   string
+	params []interface{}
 }
 
 // Job is an interface for submitted cron jobs.
@@ -66,7 +73,18 @@ type Entry struct {
 
 	// The Job's name
 	Name string
+
+	// The Job's func name
+	FuncName string
+
+	// The Job's func param
+	params []interface{}
 }
+
+const (
+	ModeNormal = "normal"
+	ModeRedis  = "redis"
+)
 
 // Valid returns true if this is not the zero entry.
 func (e Entry) Valid() bool { return e.ID != 0 }
@@ -100,14 +118,14 @@ func New() *Cron {
 		remove:     make(chan EntryID),
 		removeName: make(chan string),
 		running:    false,
-		mode:       "normal",
+		mode:       ModeNormal,
 	}
 }
 
-func NewPoolWithRedis(v *viper.Viper, ns string) *Cron {
+func NewPoolWithRedis(v *viper.Viper, ns string, funcList map[string]interface{}) *Cron {
 	err := InitRedisClient(v, ns)
 	if err != nil {
-		log.Error("Init Redis Err")
+		fmt.Println("Init Redis Err")
 		return New()
 	}
 	cron := &Cron{
@@ -118,10 +136,12 @@ func NewPoolWithRedis(v *viper.Viper, ns string) *Cron {
 		remove:     make(chan EntryID),
 		removeName: make(chan string),
 		running:    false,
-		mode:       "redis",
+		mode:       ModeRedis,
 		ns:         ns,
+		funcList:   funcList,
 	}
-	RedisCli.Set(buildCronKey(ns), cron.entries, 0)
+	RedisCli.Set(buildCronKey(ns), "", 0)
+	cron.AddFunc("5 * * * * *", time.Now().Format("2006-01-02"), cron.syncCrons, true)
 	return cron
 }
 
@@ -134,6 +154,17 @@ type FuncJob func()
 
 func (f FuncJob) Run() { f() }
 
+// AddFuncInRedis adds a func to the Cron to be run on the given schedule.
+func (c *Cron) AddFuncInRedis(spec, start, funcName string, cmd func(), unique bool, params []interface{}, names ...string) (EntryID, error) {
+	var name string
+	if len(names) <= 0 {
+		name = fmt.Sprintf("%d", time.Now().Unix())
+	} else {
+		name = names[0]
+	}
+	return c.AddJob(spec, start, funcName, FuncJob(cmd), unique, params, name)
+}
+
 // AddFunc adds a func to the Cron to be run on the given schedule.
 func (c *Cron) AddFunc(spec, start string, cmd func(), unique bool, names ...string) (EntryID, error) {
 	var name string
@@ -142,7 +173,8 @@ func (c *Cron) AddFunc(spec, start string, cmd func(), unique bool, names ...str
 	} else {
 		name = names[0]
 	}
-	return c.AddJob(spec, start, FuncJob(cmd), unique, name)
+	return c.AddJob(spec, start, "", FuncJob(cmd), unique, nil, name)
+
 }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
@@ -160,11 +192,11 @@ func (c *Cron) AddOnceFunc(spec, start string, cmd func(), names ...string) (Ent
 		c.RemoveByName(name)
 	}
 
-	return c.AddJob(spec, start, FuncJob(onceCmd), true, name)
+	return c.AddJob(spec, start, "", FuncJob(onceCmd), true, nil, name)
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) AddJob(spec, start string, cmd Job, unique bool, names ...string) (EntryID, error) {
+func (c *Cron) AddJob(spec, start, funcName string, cmd Job, unique bool, params []interface{}, names ...string) (EntryID, error) {
 	schedule, err := Parse(spec, start)
 	if err != nil {
 		return 0, err
@@ -178,11 +210,11 @@ func (c *Cron) AddJob(spec, start string, cmd Job, unique bool, names ...string)
 	if unique && len(names) > 0 {
 		c.RemoveByName(name)
 	}
-	return c.Schedule(schedule, cmd, spec, name), nil
+	return c.Schedule(schedule, cmd, spec, funcName, params, name), nil
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job, spec string, names ...string) EntryID {
+func (c *Cron) Schedule(schedule Schedule, cmd Job, spec, funcName string, params []interface{}, names ...string) EntryID {
 	var name string
 	if len(names) <= 0 {
 		name = fmt.Sprintf("%d", time.Now().Unix())
@@ -196,6 +228,8 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job, spec string, names ...string
 		Job:      cmd,
 		Name:     name,
 		Spec:     spec,
+		FuncName: funcName,
+		params:   params,
 	}
 	if !c.running {
 		c.addEntry(entry)
@@ -212,6 +246,45 @@ func (c *Cron) Entries() []Entry {
 		return <-c.snapshot
 	}
 	return c.entrySnapshot()
+}
+
+func (c *Cron) syncCrons() {
+	set := c.getNameSet()
+	entries := c.getEntries()
+	for i, v := range set {
+		if entryExists(entries, i) {
+			continue
+		}
+		if v.name == "" {
+			return
+		}
+		f, ok := c.funcList[v.name]
+		if ok {
+			exec(f, v.params)
+		}
+	}
+}
+
+func exec(function interface{}, params []interface{}) {
+	f := reflect.ValueOf(function)
+	if len(params) != f.Type().NumIn() {
+		fmt.Println("The number of params is not adapted.")
+		return
+	}
+	in := make([]reflect.Value, len(params))
+	for k, param := range params {
+		in[k] = reflect.ValueOf(param)
+	}
+	f.Call(in)
+}
+
+func entryExists(entries []*Entry, name string) bool {
+	for _, v := range entries {
+		if v.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Entry returns a snapshot of the given entry, or nil if it couldn't be found.
@@ -333,7 +406,7 @@ func (c *Cron) entrySnapshot() []Entry {
 }
 
 func (c *Cron) addEntry(e *Entry) {
-	if c.mode == "normal" {
+	if c.mode == ModeNormal {
 		c.entries = append(c.entries, e)
 		return
 	}
@@ -345,20 +418,37 @@ func (c *Cron) addEntry(e *Entry) {
 	entries := c.getEntries()
 	entries = append(entries, e)
 	c.setEntries(entries)
+	if c.nameExists(e.Name) {
+		fmt.Println("Entry Name already exists")
+		return
+	}
+	c.addNameSet(e.Name, e.FuncName, e.params)
 	return
 }
 
 func (c *Cron) removeEntry(id EntryID) {
+	entries := c.getEntries()
 	var re []*Entry
+	if c.mode == ModeNormal {
+		for _, e := range entries {
+			if e.ID != id {
+				re = append(re, e)
+			}
+		}
+		c.setEntries(re)
+		return
+	}
+
 	lock, err := c.newLock()
 	if err != nil {
 		return
 	}
 	defer lock.Unlock()
-	entries := c.getEntries()
 	for _, e := range entries {
 		if e.ID != id {
 			re = append(re, e)
+		} else {
+			c.removeNameSet(e.Name)
 		}
 	}
 	c.setEntries(re)
@@ -366,52 +456,114 @@ func (c *Cron) removeEntry(id EntryID) {
 
 func (c *Cron) removeEntryByName(name string) {
 	var re []*Entry
+	entries := c.getEntries()
+	if c.mode == ModeNormal {
+		for _, e := range entries {
+			if e.Name != name {
+				re = append(re, e)
+			}
+		}
+		c.setEntries(re)
+		return
+	}
 	lock, err := c.newLock()
 	if err != nil {
 		return
 	}
 	defer lock.Unlock()
-	entries := c.getEntries()
 	for _, e := range entries {
 		if e.Name != name {
 			re = append(re, e)
 		}
 	}
 	c.setEntries(re)
+	c.removeNameSet(name)
 }
 
 func (c *Cron) getEntries() []*Entry {
-	if c.mode == "normal" {
-		return c.entries
-	}
-	entriesStr, err := RedisCli.GetString(buildCronKey(c.ns))
-	if err != nil {
-		log.Error("Get Entries from Redis Err: ", err)
+	// if c.mode == "normal" {
+	return c.entries
+	// }
+	// entriesStr, err := RedisCli.GetString(buildCronKey(c.ns))
+	// if err != nil {
+	// 	fmt.Println("Get Entries from Redis Err: ", err)
+	// 	return nil
+	// }
+	// var re []*Entry
+	// err = json.Unmarshal([]byte(entriesStr), &re)
+	// if err != nil {
+	// 	fmt.Println("Unmarshal Entries from Redis Err: ", err)
+	// 	return nil
+	// }
+	// return re
+}
+
+func (c *Cron) setEntries(e []*Entry) error {
+	// if c.mode == "normal" {
+	c.entries = e
+	return nil
+	// }
+	// entriesStr, _ := json.Marshal(e)
+	// _, err := RedisCli.Set(buildCronKey(c.ns), string(entriesStr), 0)
+	// return err
+}
+
+func (c *Cron) getNameSet() map[string]FuncInfo {
+	if c.mode == ModeNormal {
 		return nil
 	}
-	var re []*Entry
+	entriesStr, err := RedisCli.Get(buildCronKey(c.ns)).Result()
+	if err != nil {
+		fmt.Println("Get Entries from Redis Err: ", err)
+		return nil
+	}
+	fmt.Println("entryStr: ", entriesStr)
+	if entriesStr == "" {
+		return make(map[string]FuncInfo, 0)
+	}
+	var re map[string]FuncInfo
 	err = json.Unmarshal([]byte(entriesStr), &re)
 	if err != nil {
-		log.Error("Unmarshal Entries from Redis Err: ", err)
+		fmt.Println("Unmarshal Entries from Redis Err: ", err)
 		return nil
 	}
 	return re
 }
 
-func (c *Cron) setEntries(e []*Entry) error {
-	if c.mode == "normal" {
-		c.entries = e
-		return nil
-	}
-	entriesStr, _ := json.Marshal(e)
-	_, err := RedisCli.Set(buildCronKey(c.ns), string(entriesStr), 0)
+func (c *Cron) setNameSet(s map[string]FuncInfo) error {
+	setStr, _ := json.Marshal(s)
+	_, err := RedisCli.Set(buildCronKey(c.ns), string(setStr), 0)
 	return err
+}
+
+func (c *Cron) removeNameSet(name string) error {
+	nameSet := c.getNameSet()
+	delete(nameSet, name)
+	return c.setNameSet(nameSet)
+}
+
+func (c *Cron) addNameSet(name, funcName string, params []interface{}) error {
+	nameSet := c.getNameSet()
+	if !c.nameExists(name) {
+		nameSet[name] = FuncInfo{
+			name:   funcName,
+			params: params,
+		}
+		return c.setNameSet(nameSet)
+	}
+	return errors.New("name already exists")
+}
+
+func (c *Cron) nameExists(name string) bool {
+	nameSet := c.getNameSet()
+	_, ok := nameSet[name]
+	return ok
 }
 
 func (c *Cron) newLock() (*lock.Locker, error) {
 	lock, err := lock.Obtain(RedisCli.Client, buildCronKey(c.ns), nil)
 	if err != nil {
-		log.Error("Obtain Redis Lock Err: ", err)
+		fmt.Println("Obtain Redis Lock Err: ", err)
 		return nil, err
 	}
 	return lock, nil

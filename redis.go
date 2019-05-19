@@ -145,7 +145,7 @@ func RedisClient(serviceName string) *RedisCache {
 }
 
 //buildConfig check config error and return RedisConfig struct
-func buildConfig(c viper.Viper) (*RedisConfig, error) {
+func buildConfig(c *viper.Viper) (*RedisConfig, error) {
 	serverType := c.GetString("redis.type")
 	if serverType != MODE_LOCAL && serverType != MODE_SENTINEL {
 		return nil, errors.New("config redis.type is invalid, your type is " + serverType)
