@@ -1,4 +1,4 @@
-package cron // Copyright 2018 FreeWheel. All Rights Reserved.
+package cron
 
 // Author: rfma@freewheel.tv
 // Date: 06/02/2018
@@ -10,11 +10,10 @@ import (
 	"fmt"
 	"time"
 
-	"wheels/log"
+	"sync"
 
 	"github.com/go-redis/redis"
 	"github.com/spf13/viper"
-	"sync"
 )
 
 const (
@@ -22,18 +21,6 @@ const (
 	MODE_LOCAL = "local"
 	//MODE_SENTINEL mode
 	MODE_SENTINEL = "sentinel"
-	//GLOBAL like a common service name identify each domain service, and act as key prefix by default
-	GLOBAL = "service:global:"
-	// FORECAST_SERVICE const
-	FORECAST_SERVICE  = "service:forecast:"
-	INVENTORY_SERVICE = "service:inventory:"
-	CREATIVE_SERVICE  = "service:creative:"
-	PARTNER_SERVICE   = "service:partner:"
-	ORDER_SERVICE     = "service:order:"
-	TARGET_SERVICE    = "service:target:"
-	METADATA_SERVICE  = "service:metadata:"
-
-	DAL_SERVICE = "infra:dal:"
 )
 
 var (
@@ -50,9 +37,9 @@ type RedisCache struct {
 
 // RedisConfig is a configuration which is created by init from service config file
 type RedisConfig struct {
-	serverType string
-	masterName string
-	servers    []string
+	ServerType string
+	MasterName string
+	Servers    []string
 }
 
 // ConcurrentMap is a wrapper for saving redis client instances and supports concurrency.
@@ -74,7 +61,7 @@ func init() {
 var RedisCli *RedisCache
 
 //InitRedis init redis client for ours
-func InitRedisClient(c *viper.Viper, ns string) error {
+func InitRedisClient(c *RedisConfig, ns string) error {
 	err := InitRedis(c, ns)
 	RedisCli = RedisClient(ns)
 	return err
@@ -87,40 +74,36 @@ func InitRedisClient(c *viper.Viper, ns string) error {
 // 		redis:
 //			type: local  #local,sentinel,cluster
 //			master_name: mymaster
-//			servers:
+//			Servers:
 //				- 127.0.0.1:6379
-func InitRedis(c *viper.Viper, service string) error {
-	log.Warn("Redis init get started...")
-	config, err := buildConfig(c)
-	if err != nil {
-		log.Errorf("build redis config error: %s", err)
-		return err
-	}
+func InitRedis(config *RedisConfig, service string) error {
+
+	fmt.Println("Redis init get started...")
 	//this function maybe be called by multiple thread, so add lock for concurrency issue.
 	safeMap.Lock()
 	defer safeMap.Unlock()
 	//check client for current service is created or not
 	if RedisClient(service) != nil {
-		log.Warnf("redis client for %s service has been created", service)
+		fmt.Println("redis client for %s service has been created", service)
 		return nil
 	}
 	//init client via type
 	var client *redis.Client
-	switch config.serverType {
+	switch config.ServerType {
 	case MODE_LOCAL:
 		client = redis.NewClient(&redis.Options{
-			Addr: config.servers[0],
+			Addr: config.Servers[0],
 		})
 	case MODE_SENTINEL:
 		client = redis.NewFailoverClient(&redis.FailoverOptions{
-			MasterName:    config.masterName,
-			SentinelAddrs: config.servers,
+			MasterName:    config.MasterName,
+			SentinelAddrs: config.Servers,
 		})
 		//do not need default branch, build config already restrict that
 	}
 	//connecting check
 	ping, err := client.Ping().Result()
-	log.Warnf("Redis client ping result: %s", ping)
+	fmt.Println("Redis client ping result: ", ping)
 	if err != nil {
 		return err
 	}
@@ -132,7 +115,7 @@ func InitRedis(c *viper.Viper, service string) error {
 	}
 	safeMap.Clients[service] = redisCache
 
-	log.Warn("Redis connected successfully")
+	fmt.Println("Redis connected successfully")
 	return nil
 }
 
@@ -159,9 +142,9 @@ func buildConfig(c *viper.Viper) (*RedisConfig, error) {
 		return nil, errors.New("config redis.servers is empty")
 	}
 	return &RedisConfig{
-		serverType: serverType,
-		masterName: master,
-		servers:    servers,
+		ServerType: serverType,
+		MasterName: master,
+		Servers:    servers,
 	}, nil
 }
 
